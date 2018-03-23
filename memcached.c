@@ -228,6 +228,7 @@ static void settings_init(void) {
     settings.maxbytes = 64 * 1024 * 1024; /* default is 64MB */
     settings.maxconns = 1024;         /* to limit connections-related memory to about 5MB */
     settings.verbose = 0;
+    settings.stop_verbose_time = 0;
     settings.oldest_live = 0;
     settings.oldest_cas = 0;          /* supplements accuracy of oldest_live */
     settings.evict_to_free = 1;       /* push old items out of cache when memory runs out */
@@ -3196,6 +3197,7 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     APPEND_STAT("udpport", "%d", settings.udpport);
     APPEND_STAT("inter", "%s", settings.inter ? settings.inter : "NULL");
     APPEND_STAT("verbosity", "%d", settings.verbose);
+    APPEND_STAT("stop_verbose_time", "%d", settings.stop_verbose_time);
     APPEND_STAT("oldest", "%lu", (unsigned long)settings.oldest_live);
     APPEND_STAT("evictions", "%s", settings.evict_to_free ? "on" : "off");
     APPEND_STAT("domain_socket", "%s",
@@ -3966,6 +3968,30 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     }
 }
 
+static void start_auto_verbose() {
+  if (settings.stop_verbose_time != -1) {
+    return;
+  }
+  time_t now = time(0);
+  if (settings.verbose == 0) {
+    fprintf(stderr, "AUTO VERBOSE START\n");
+    settings.verbose = 3;
+    settings.stop_verbose_time = now + 30;
+  }
+}
+
+static void stop_auto_verbose_if_needed() {
+  if (settings.verbose == 0 || settings.stop_verbose_time <= 0) {
+    return;
+  }
+  time_t now = time(0);
+  if (settings.stop_verbose_time <= now) {
+    settings.verbose = 0;
+    settings.stop_verbose_time = 0;
+    fprintf(stderr, "AUTO VERBOSE STOP\n");
+  }
+}
+
 static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
     char *key;
     size_t nkey;
@@ -3977,6 +4003,8 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
     item *it;
 
     assert(c != NULL);
+
+    stop_auto_verbose_if_needed();
 
     set_noreply_maybe(c, tokens, ntokens);
 
@@ -4030,6 +4058,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
             out_string(c, "SERVER_ERROR object too large for cache");
             status = TOO_LARGE;
         } else {
+            start_auto_verbose();
             out_of_memory(c, "SERVER_ERROR out of memory storing object");
             status = NO_MEMORY;
         }
@@ -4338,6 +4367,19 @@ static void process_verbosity_command(conn *c, token_t *tokens, const size_t nto
 
     level = strtoul(tokens[1].value, NULL, 10);
     settings.verbose = level > MAX_VERBOSITY_LEVEL ? MAX_VERBOSITY_LEVEL : level;
+    out_string(c, "OK");
+    return;
+}
+
+static void process_stop_verbose_time_command(conn *c, token_t *tokens, const size_t ntokens) {
+    time_t stop_verbose_time;
+
+    assert(c != NULL);
+
+    set_noreply_maybe(c, tokens, ntokens);
+
+    stop_verbose_time = strtoul(tokens[1].value, NULL, 10);
+    settings.stop_verbose_time = stop_verbose_time;
     out_string(c, "OK");
     return;
 }
@@ -4871,6 +4913,8 @@ static void process_command(conn *c, char *command) {
         process_memlimit_command(c, tokens, ntokens);
     } else if ((ntokens == 3 || ntokens == 4) && (strcmp(tokens[COMMAND_TOKEN].value, "verbosity") == 0)) {
         process_verbosity_command(c, tokens, ntokens);
+    } else if ((ntokens == 3 || ntokens == 4) && (strcmp(tokens[COMMAND_TOKEN].value, "stop_verbose_time") == 0)) {
+        process_stop_verbose_time_command(c, tokens, ntokens);
     } else if (ntokens >= 3 && strcmp(tokens[COMMAND_TOKEN].value, "lru") == 0) {
         process_lru_command(c, tokens, ntokens);
 #ifdef MEMCACHED_DEBUG
@@ -6704,6 +6748,7 @@ int main (int argc, char **argv) {
           "hiV" /* help, licence info, version */
           "r"   /* maximize core file limit */
           "v"   /* verbose */
+          "z:"   /* stop verbose time */
           "d"   /* daemon mode */
           "l:"  /* interface to listen on */
           "u:"  /* user identity to run as */
@@ -6741,6 +6786,7 @@ int main (int argc, char **argv) {
         {"version", no_argument, 0, 'V'},
         {"enable-coredumps", no_argument, 0, 'r'},
         {"verbose", optional_argument, 0, 'v'},
+        {"stop-verbose-time", required_argument, 0, 'z'},
         {"daemon", no_argument, 0, 'd'},
         {"listen", required_argument, 0, 'l'},
         {"user", required_argument, 0, 'u'},
@@ -6815,6 +6861,9 @@ int main (int argc, char **argv) {
             break;
         case 'v':
             settings.verbose++;
+            break;
+        case 'z':
+            settings.stop_verbose_time = atoi(optarg);
             break;
         case 'l':
             if (settings.inter != NULL) {
